@@ -27,12 +27,15 @@ from keras.layers import Dropout
 
 
 class analysis(): 
-    def __init__(self): 
+    
+    def __init__(self):
+        
         self.train = "dengue_features_train.csv"
         self.test = "dengue_features_test.csv"
         self.labels = "dengue_labels_train.csv"
         
-    def load_data(self): 
+    def load_data(self):
+        
         self.data = pd.read_csv(self.train)
         self.data["index"] = [i for i in range(self.data.shape[0])]
         self.test = pd.read_csv(self.test)
@@ -40,6 +43,7 @@ class analysis():
         print("Testing dim: {}".format(self.test))
         
     def find_clust_train(self):
+        
         self.clust = self.data.iloc[:,8:]
         self.clust['index']=self.data['index']
         self.clust = self.clust.dropna()
@@ -76,6 +80,7 @@ class analysis():
         self.colors = colors
         
     def inpute_train_on_clust(self):
+        
         self.data = self.data[self.data['index'].isin(self.index)]
         self.data["clust"] = self.colors
         
@@ -93,6 +98,7 @@ class analysis():
         print(self.data)
     
     def find_clust_test(self):
+        
         self.index = [i for i in range(self.test.shape[0])]
         self.clust = self.test.iloc[:,6:19].fillna(0)
         scaler = MinMaxScaler(feature_range=(0,1))
@@ -118,6 +124,7 @@ class analysis():
         self.clust["clust"]=kmeans.labels_
         
     def impute_test_on_clust(self):
+        
         self.C1 = self.test[self.clust["clust"]==0]
         self.C2 = self.test[self.clust["clust"]==1]
         self.C3 = self.test[self.clust["clust"]==2]
@@ -128,6 +135,7 @@ class analysis():
         self.X_test = pd.concat([self.C1,self.C2,self.C3],axis=0)
 
     def model(self):
+        
         print(self.X_train.columns,self.X_test.columns)
         print(np.unique(self.X_train['city']))
         
