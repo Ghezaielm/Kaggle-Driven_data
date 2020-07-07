@@ -1,0 +1,632 @@
+---
+title: "Titanic_Kaggle"
+author: "GHEZAIEL Morad"
+date: "06/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(factoextra)
+library(FactoMineR)
+library(stringr)
+library(ica)
+library(gridExtra)
+library(corrplot)
+library(cluster)
+library(plotly)
+```
+
+# Path init 
+```{r}
+path = "/home/jaz/PycharmProjects/DS/Titanic/titanic/"
+train_path = paste0(path,"train.csv")
+test_path = paste0(path,"test.csv")
+sub_path = paste0(path,'gender_submission.csv')
+```
+
+# Load data 
+```{r}
+train = read.csv(train_path)
+test = read.csv(test_path)
+sub = read.csv(sub_path)
+train
+test
+sub
+```
+
+# Processing 
+
+## Feature extraction
+
+### We first look for NA values 
+
+```{r}
+na.rows = which(is.na(train)==TRUE)
+for(i in 1:length(train))
+{
+  print(names(train)[i])
+  print(anyNA(train[,i]))
+}
+```
+
+It seems that only the age feature contains na values. 
+We will later perform clustering on the remaining features and impute the missing data accordingly. 
+
+But first, let's digitize the data matrix 
+
+```{r}
+processed = train 
+processed$Sex = as.integer(processed$Sex)
+processed$Embarked = as.integer(processed$Embarked)
+```
+
+There is 3 string like feature: 
+- Passenger name 
+- Ticket ID 
+- Cabin ID 
+
+We will process it independantly, 
+
+### Passenger name processing
+To encode names as numeric features, we will consider a bag of syllabs 
+and will one-hot encode their presence in passengers names. 
+
+```{r}
+# One hot encode syllabs occurences
+syllabs = c("on","ey","en","field","ing","ee","an","er","ard","Mc","k","w","am","sk",'"','[)]')
+df = data.frame(id = 1:dim(train)[1])
+for(i in 1:length(syllabs))
+{
+ syl = syllabs[i]
+ is_present = sapply(train$Name,function(x){if(str_detect(x,syl)==TRUE){1} else{0}})
+ df = cbind(df,is_present)
+}
+names(df) = c("id",syllabs)
+
+# Data viz 
+df = df[,2:length(df)]
+ggplot(data.frame(colSums(df)),aes(x=reorder(colnames(df),colSums(df)),y=colSums(df)))+
+  geom_col(stat='identity',fill="lightblue",color="white")+
+  xlab("Syllab in passengers names")+
+  ylab("Frequency")
+
+
+```
+
+Then we make sure that our bag of syllabs cover the entire Name space
+```{r}
+df[rowSums(df)==0,]
+```
+
+
+
+
+### Ticket id processing 
+
+It appears that this feature is composed by strings and numbers. 
+Also, strings are composed by characters prefixs followed by a number. 
+Some prefix are redondant, some others are not. 
+
+For numbers, we will assume that they are not quantitative variables. 
+Instead, we will take account of their length and their parity.
+
+In that way, we will encode this feature as following: 
+- Presence of a prefix (A)
+- Presence of backslash in the prefix (B)
+- Presence of dot in the prefix (C)
+- Length of the character prefix (D)
+- Length of the number id (E)
+- Parity of the number id (F)
+
+```{r}
+# We use regular expression for that task
+A = sapply(train$Ticket, function(x){str_detect(x,"[a-zA-Z]")})
+B = sapply(train$Ticket, function(x){str_detect(x,"[/]")})
+C = sapply(train$Ticket, function(x){str_detect(x,"[.]")})
+D = sapply(train$Ticket, function(x){length(unlist(str_extract_all(x,"[a-zA-Z./]")))})
+E = sapply(train$Ticket, function(x){str_length(unlist(str_extract(x,"[0-9]{2,12}")))})
+F = as.integer(unlist(str_extract(train$Ticket,"[0-9]{2,12}")))%%2==0
+
+# Impute NA with most common
+D[is.na(D)]<-mean(D)
+E[is.na(E)]<-names(sort(table(E)))[length(table(E))]
+F[is.na(F)]<-FALSE
+
+# Digitize
+A = as.integer(A)
+B = as.integer(B)
+C = as.integer(C)
+E = as.integer(E)
+F = as.integer(F)
+
+# Data viz
+ticket = data.frame(has.prefix =A, has.backslash =B, has.dot = C, is.pair=F)
+p1 <- ggplot(data.frame(colSums(ticket)),aes(x=reorder(colnames(ticket),colSums(ticket)),y=colSums(ticket)/dim(ticket)[1]))+
+  geom_col(fill="lightblue",color="white")+
+  xlab("Features")+
+  ylab("Frequency")
+p2 <- ggplot(data.frame(D=D),aes(D))+geom_histogram(bins=5,fill="blue",color="white")+xlab("Prefix length")
+p3 <- ggplot(data.frame(E=E),aes(E))+geom_histogram(bins=5,fill="darkblue",color="white")+xlab("Number length")
+grid.arrange(p1,p2,p3,ncol=2)+theme_grey()
+```
+
+### Cabin ID processing 
+
+This feature is composed by strings and white spaces. 
+Some passengers are given more than 1 cabin.
+Conversly, some are not given any cabin. 
+
+Similarly to the ticket feature, we will encode this one as following: 
+
+- Has at least one cabin (G)
+- Number of cabins (H)
+- Cabin letter (I)
+
+We could consider more encoded feature such as consecutivness of cabins or parity, but we will keep it simple. 
+
+```{r}
+G = sapply(train$Cabin, function(x){str_detect(x,"[^a-zA-Z0-9]")})
+H = sapply(train$Cabin, function(x){length(unlist(str_extract_all(x,"[a-zA-Z0-9]+")))})
+I = sapply(train$Cabin, function(x){unlist(str_extract_all(x,"[a-zA-Z]"))})
+I = unlist(lapply(I,function(x)(if("A" %in% x){1}
+                         else if("B" %in% x){2}
+                         else if("C" %in% x){3}
+                         else if("D" %in% x){4}
+                         else if("E" %in% x){5}
+                         else if("F" %in% x){6}
+                         else if("G" %in% x){7}
+                         else {0}
+                         )))
+G = as.integer(G)
+p1 <- ggplot(data.frame(G=G),aes(x = sapply(G,function(x){if(x==0){"No"}else{"Yes"}})))+geom_bar(fill="lightblue",color="white")+xlab("Has at least one cabin")
+p2 <- ggplot(data.frame(H=H),aes(H))+geom_histogram(bins=5,fill="blue",color="white")+xlab("Number of cabins")
+p3 <- ggplot(data.frame(I=I),aes(I))+geom_histogram(bins=5,fill="darkblue",color="white")+xlab("Floor")
+grid.arrange(p1,p2,p3,ncol=2)+theme_grey()
+
+```
+
+Now, lets create a new dataframe to store our extracted features and the other ones. 
+
+```{r}
+# Add extracted features
+df.extracted = data.frame(id = train$PassengerId)
+df.extracted = cbind(df.extracted,df[,2:length(df)])
+df.extracted$A = A
+df.extracted$B = B 
+df.extracted$C = C 
+df.extracted$D = D 
+df.extracted$E = E 
+df.extracted$F = F 
+df.extracted$G = G 
+df.extracted$H = H 
+df.extracted$I = I 
+
+# Merge with the initial dataframe
+df.extracted = cbind(df.extracted,processed)
+
+# Remove the old features and digitize some
+df.extracted$id = NULL 
+df.extracted$Name = NULL
+df.extracted$Ticket = NULL 
+df.extracted$Cabin = NULL 
+df.extracted$Embarked = as.integer(df.extracted$Embarked)
+
+# Store the label 
+label = train$Survived
+
+# Store the na containing feature 
+na.age = df.extracted$Age
+df.extracted$Age = NULL
+
+# Store the passenger id label 
+p.id = df.extracted$PassengerId
+df.extracted$PassengerId = NULL
+```
+
+## Feature engineering
+
+In this step, we will produce more features with the aim to facilitate 
+the classification task. 
+
+"Womens and kids before". This sentence may inform us on the importance of the sex and age features. 
+
+As evoked previously the age of the passengers appears to contain NA values. 
+To overcome this problem, we will impute the vector according to a clustering label. 
+
+We first need to find which features positively correlate with surviveness. 
+Then, we will combine these features to produce a relevant variable space for clustering and further imputation. 
+
+### Correlation
+```{r}
+df.extracted$label = label
+cormat = cor(df.extracted)
+curr = data.frame(cormat)
+corrplot(cormat,tl.cex=0.7)
+```
+
+A common problem in feature engineering is the presence of null values which cannot be divided or multiplied (in an information conservation context). 
+
+To overcome this, we simply add 1 to the whole dataset. 
+
+```{r}
+df.extracted$label = NULL 
+df.extracted = df.extracted+1
+```
+
+Then, we will combine the features according to the correlation plot: 
+1) Find features that are highly absolutely correlated with survivness (main features)
+2) Find features that highly absolutely correlated with the main features and combine them (secondary features)
+3) Then, combine secondary features with their respective main features (resulting feature)
+4) Combine resulting features from each main features together 
+
+
+<b>Main features:
+    Secondary features:</b>
+    
+- Sex: 
+    - Pclass,I,H, Parch,Fare
+- Pclass: 
+    - I,H, Fare,Embarked
+- I: 
+    - H, ), er, B, C, Fare,Embarked
+- H: 
+    - G, er, B, C, Fare,Embarked,Parch
+- G: 
+    - er,ard,field,Fare,Parch,I,Pclass
+- (:
+    - k,w,am,sk,er,ing,field,en,ey,on,sex,parch,I,pclass,"
+- ":
+    - en,(,sex
+- er: 
+  - Fare,parch,sibsp,pclass
+  
+
+We then compute correlation of these feature with survivness and filter interesting ones
+
+
+The results indicates several groups of correlated features. 
+Not very visible, but the last row/col is the label, it appears to be absolutely correlated 
+to our engineered features, that's what we looked for ! 
+
+### Age imputation 
+
+With a relevant variable space, we can now try to impute the NA containing feature. 
+As evoked previously, we will perform clustering to identify group of individuals. 
+Then, we will impute the concerned individuals within their own clusters. 
+
+First, we perform principal component analysis on unscaled data 
+
+```{r}
+# Merge the original dataset with the feature augmented 
+df_tocluster = df.extracted
+#df_engineered$label = NULL
+df_tocluster$f2 = NULL
+res.pca = PCA(df_tocluster,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(label)))+geom_point()
+
+```
+ 
+Clusters are quite fuzzy, but the first component appears to be able to separate the two clusters. 
+Conversly, the second dimensions appears to be responsible to the fuzzy structure
+Let's subset the variable space to those with no or very low contribution to the second axis
+
+```{r}
+df_tocluster$A = NULL
+df_tocluster$B = NULL 
+df_tocluster$C = NULL 
+df_tocluster$D = NULL
+res.pca = PCA(df_tocluster,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(label)))+geom_point()
+
+
+km.out = kmeans(df_tocluster,centers=10,nstart =20)
+
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(km.out$cluster)))+geom_point()
+```
+
+```{r}
+contribs = data.frame(res.pca$var$coord)
+contribs
+plot(contribs$Dim.1)
+plot(contribs$Dim.2)
+plot(contribs$Dim.3)
+```
+
+
+```{r}
+df_tocluster$k = NULL
+res.pca = PCA(df_tocluster,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(label)))+geom_point()
+
+
+km.out = kmeans(df_tocluster,centers=10,nstart =20)
+
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(km.out$cluster)))+geom_point()
+```
+
+```{r}
+contribs = data.frame(res.pca$var$coord)
+contribs
+plot(contribs$Dim.1)
+plot(contribs$Dim.2)
+plot(contribs$Dim.3)
+```
+
+
+```{r}
+f2 = mapply(function(x,y){x*y}, df_tocluster$Parch, df_tocluster$SibSp)
+df_tocluster$f2 = f2
+```
+
+```{r}
+res.pca = PCA(df_tocluster,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(label)))+geom_point()
+
+
+km.out = kmeans(df_tocluster,centers=10,nstart =20)
+
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(km.out$cluster)))+geom_point()
+```
+
+# To do: impute missing according to mean in cluster 
+
+
+```{r}
+train$Age
+for(i in 1:length(train$Age))
+{
+  if(is.na(train$Age[i]) | is.nan(train$Age[i]))
+  {
+    label = km.out$cluster[i]
+    target = train$Age[which(km.out$cluster==label)]
+    print(mean(na.omit(target)))
+    train$Age[i] <- mean(na.omit(target))
+  }
+}
+train$Age
+```
+
+```{r}
+df_tocluster$Age = train$Age
+df_tocluster = na.omit(df_tocluster)
+label = train$Survived
+label = label[!is.na(train$Age)]
+```
+
+Now, lets perform PCA another time to get insight into age contribution
+
+
+```{r}
+res.pca = PCA(df_tocluster,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(label)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(label)))+geom_point()
+
+
+km.out = kmeans(df_tocluster,centers=10,nstart =20)
+
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(km.out$cluster)))+geom_point()
+```
+
+Now, let's perform the same process but for the test set 
+
+```{r}
+na.rows = which(is.na(test)==TRUE)
+for(i in 1:length(test))
+{
+  print(names(test)[i])
+  print(anyNA(test[,i]))
+}
+```
+
+Same as previously, only the age feature contains NA values 
+
+```{r}
+processed = test 
+processed$Sex = as.integer(processed$Sex)
+processed$Embarked = as.integer(processed$Embarked)
+```
+
+```{r}
+# One hot encode syllabs occurences
+syllabs = c("on","ey","en","field","ing","ee","an","er","ard","Mc","k","w","am","sk",'"','[)]')
+df = data.frame(id = 1:dim(test)[1])
+for(i in 1:length(syllabs))
+{
+ syl = syllabs[i]
+ is_present = sapply(test$Name,function(x){if(str_detect(x,syl)==TRUE){1} else{0}})
+ df = cbind(df,is_present)
+}
+names(df) = c("id",syllabs)
+
+```
+
+```{r}
+# We use regular expression for that task
+A = sapply(test$Ticket, function(x){str_detect(x,"[a-zA-Z]")})
+B = sapply(test$Ticket, function(x){str_detect(x,"[/]")})
+C = sapply(test$Ticket, function(x){str_detect(x,"[.]")})
+D = sapply(test$Ticket, function(x){length(unlist(str_extract_all(x,"[a-zA-Z./]")))})
+E = sapply(test$Ticket, function(x){str_length(unlist(str_extract(x,"[0-9]{2,12}")))})
+F = as.integer(unlist(str_extract(test$Ticket,"[0-9]{2,12}")))%%2==0
+
+# Impute NA with most common
+D[is.na(D)]<-mean(D)
+E[is.na(E)]<-names(sort(table(E)))[length(table(E))]
+F[is.na(F)]<-FALSE
+
+# Digitize
+A = as.integer(A)
+B = as.integer(B)
+C = as.integer(C)
+E = as.integer(E)
+F = as.integer(F)
+```
+
+```{r}
+G = sapply(test$Cabin, function(x){str_detect(x,"[^a-zA-Z0-9]")})
+H = sapply(test$Cabin, function(x){length(unlist(str_extract_all(x,"[a-zA-Z0-9]+")))})
+I = sapply(test$Cabin, function(x){unlist(str_extract_all(x,"[a-zA-Z]"))})
+I = unlist(lapply(I,function(x)(if("A" %in% x){1}
+                         else if("B" %in% x){2}
+                         else if("C" %in% x){3}
+                         else if("D" %in% x){4}
+                         else if("E" %in% x){5}
+                         else if("F" %in% x){6}
+                         else if("G" %in% x){7}
+                         else {0}
+                         )))
+G = as.integer(G)
+```
+
+```{r}
+# Add extracted features
+df.extracted_test = data.frame(id = test$PassengerId)
+df.extracted_test = cbind(df.extracted_test,df[,2:length(df)])
+df.extracted_test$A = A
+df.extracted_test$B = B 
+df.extracted_test$C = C 
+df.extracted_test$D = D 
+df.extracted_test$E = E 
+df.extracted_test$F = F 
+df.extracted_test$G = G 
+df.extracted_test$H = H 
+df.extracted_test$I = I 
+
+# Merge with the initial dataframe
+df.extracted_test = cbind(df.extracted_test,processed)
+
+# Remove the old features and digitize some
+df.extracted_test$id = NULL 
+df.extracted_test$Name = NULL
+df.extracted_test$Ticket = NULL 
+df.extracted_test$Cabin = NULL 
+df.extracted_test$Embarked = as.integer(df.extracted_test$Embarked)
+```
+
+```{r}
+# Store the na containing feature 
+na.age = df.extracted_test$Age
+df.extracted_test$Age = NULL
+
+# Store the passenger id label 
+p.id = df.extracted_test$PassengerId
+df.extracted_test$PassengerId = NULL
+```
+
+```{r}
+df.extracted_test$label = NULL 
+df.extracted_test = df.extracted_test+1
+```
+
+
+# Age imputation 
+
+```{r}
+# Merge the original dataset with the feature augmented 
+df_tocluster_test = df.extracted_test
+df_tocluster_test$f2 = NULL
+res.pca = PCA(df_tocluster_test,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3))+geom_point()
+```
+
+```{r}
+df_tocluster_test$A = NULL
+df_tocluster_test$B = NULL 
+df_tocluster_test$C = NULL 
+df_tocluster_test$D = NULL
+df_tocluster_test$k = NULL
+f2 = mapply(function(x,y){x*y}, df_tocluster_test$Parch, df_tocluster_test$SibSp)
+df_tocluster_test$f2 = f2
+
+
+res.pca = PCA(df_tocluster_test,ncp = 3) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,))+geom_point()
+
+
+
+```
+There is one individual for which the Fare feature is na
+```{r}
+km.out = kmeans(df_tocluster_test[,which(colnames(df_tocluster_test)!="Fare")],centers=10,nstart =20)
+
+ggplot(comps,aes(Dim.1,Dim.2,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=factor(km.out$cluster)))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=factor(km.out$cluster)))+geom_point()
+```
+
+```{r}
+for(i in 1:length(test$Age))
+{
+  if(is.na(test$Age[i]))
+  {
+    label = km.out$cluster[i]
+    target = test$Age[which(km.out$cluster==label)]
+    curr = na.omit(test$Age)
+    test$Age[i]<- mean(curr)
+  }
+}
+df_tocluster_test$Age = test$Age
+```
+
+```{r}
+sort(colnames(df_tocluster_test))
+```
+```{r}
+sort(colnames(df_tocluster))
+```
+
+
+```{r}
+for(i in 1:length(df_tocluster_test))
+{
+  print(colnames(df_tocluster_test)[i])
+  print(which(is.na(df_tocluster_test[,i])==TRUE))
+}
+```
+
+```{r}
+label = df_tocluster$Survived
+df_tocluster$Survived = NULL
+df_tocluster_test$on = NULL
+```
+
+```{r}
+df_tocluster$label = label
+df_tocluster_test$ID = test$PassengerId
+write.csv(df_tocluster,"train_titanic.csv")
+write.csv(df_tocluster_test,"test_titanic.csv")
+```
+
