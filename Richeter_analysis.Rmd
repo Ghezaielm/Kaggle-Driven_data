@@ -1,0 +1,792 @@
+---
+title: "Untitled"
+author: "GHEZAIEL Morad"
+date: "30/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(FactoMineR)
+library(factoextra)
+library(cluster)
+library(corrplot)
+```
+
+```{r}
+# Path init
+path = "/home/jaz/Bureau/Richeter_prediction/"
+train = paste0(path,"train_values.csv")
+test = paste0(path,"test_values.csv")
+labels = paste0(path,"train_labels.csv")
+submission = paste0(path,"submission_format.csv")
+
+```
+
+```{r}
+# Load data 
+train = data.frame(read.csv(train))
+test = data.frame(read.csv(test))
+labels = data.frame(read.csv(labels))
+submission = data.frame(read.csv(submission))
+```
+
+```{r}
+# Describe
+message("Train features: ",dim(train)[1],"-",dim(train)[2])
+message("Train labels :",dim(labels)[1],"-",dim(labels)[2])
+message("Test: ",dim(test)[1],"-",dim(test)[2])
+message("Submission: ",dim(submission)[1],"-",dim(submission)[2])
+```
+
+```{r}
+# Data mining 
+df = data.frame(name = c("Low","Mid","High"), count = table(labels$damage_grade))
+ggplot(df,aes(name, y = count.Freq))+geom_col()+ggtitle("Label frequency")+xlab("Damage level")+ylab("Count")+theme_linedraw()
+```
+
+```{r}
+head(train)
+```
+
+```{r}
+# Convert char features to integers 
+cols = names(train)
+for(i in 1:length(cols))
+{
+  train[,i]=as.integer(train[,i])
+}
+```
+
+Since the training set is quite huge (~ 260000 rows), we should consider 
+to randomly sample data points from each labels for data analysis.
+25000 datapoints by class appears to be a good choice.
+
+Let's define a function to do so: 
+
+```{r}
+sampleData <- function(df,labels,n_inds=25000)
+{
+  sampled = data.frame(NULL)
+  labs = c()
+  for(label in 1:length(unique(labels)))
+  {
+    idx = which(labels == label)
+    sampled_idx = sample(idx,n_inds)
+    sampled_label = labels[sampled_idx]
+    sampled_data = df[sampled_idx,]
+    sampled = rbind(sampled,sampled_data)
+    labs = c(labs,sampled_label)
+  }
+  sampled$label = labs
+  return(sampled)
+}
+
+sampled = sampleData(train,labels$damage_grade,n_inds=25000)
+
+```
+
+Let's perform PCA to get insight into the sampled dataset 
+
+```{r}
+ids = sampled$building_id
+sampled$building_id = NULL
+sampled_labels = sampled$label
+sampled$label = NULL
+
+res.pca = PCA(sampled,ncp = 5) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=sampled_labels))+geom_point()
+fviz_screeplot(res.pca)
+```
+
+At first sight, the cluster is showing a continuity between labels. 
+Results indicates that the 5 first components contain most of the explain variance. 
+In that way, we will focus on these components for feature engineering. 
+
+But let's first define a function to compute silhouette coefficients: 
+
+```{r}
+getSilhouette <- function(comps,labels,sampling_rate=0.1,n_runs = 3)
+{
+  # As the dataset is still huge 
+  # We have to sample the data another time
+  # We will do it three times for reproducibility
+  plots = list()
+  for (i in 1:n_runs)
+  {
+  idx = sample(1:length(labels),round(sampling_rate*length(labels)))
+  dis = dist(comps[idx,1:5])
+  labs = labels[idx]
+  sil = silhouette(labs,dis)
+  sil = as.data.frame(cbind(sil[,1],sil[,2],sil[,3]))
+  names(sil)=c("cluster","neighbor","sil_width")
+  plots[[i]]=ggplot(sil,aes(x=reorder(1:length(sil_width),cluster),y=sil_width,color=as.factor(cluster)))+geom_col()+
+             ggtitle(paste0("Silhouette coefficients, sampling_rate =",sampling_rate))+xlab("Data points")+ylab("Width")+
+             labs(color = "Damage level")
+  }
+  return(plots)
+}
+
+```
+
+```{r}
+plots = getSilhouette(comps,sampled_labels)
+plots[[1]]
+plots[[2]]
+plots[[3]]
+```
+
+A 10 % sampling appears to be stable (3 random sampling). 
+The High damage level cluster appears to be pure. 
+Conversly, the mid damage level cluster appears to be very uncertain. 
+The low damage cluster appears to be mixed. 
+
+Let's investigate the continuity of the two first clusters
+
+```{r}
+clusts_1_2 = which(sampled_labels %in% c(1,2))
+clusts_1_2_labels = sampled_labels[clusts_1_2]
+clusts_1_2_data = sampled[clusts_1_2,]
+res.pca = PCA(clusts_1_2_data,ncp = 5) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.4,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.4,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.3,Dim.4,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.5,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.5,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.3,Dim.5,color=clusts_1_2_labels))+geom_point()
+ggplot(comps,aes(Dim.4,Dim.5,color=clusts_1_2_labels))+geom_point()
+fviz_screeplot(res.pca)
+```
+
+```{r}
+res.pca$var$contrib
+```
+
+```{r}
+to_correlate = clusts_1_2_data
+to_correlate$LABEL = clusts_1_2_labels
+cormat = cor(to_correlate)
+curr = data.frame(cormat)
+filtered = clusts_1_2_data[,which(colnames(clusts_1_2_data) %in% rownames(curr)[which(abs(curr$LABEL)>0.1)])]
+filtered$LABEL = clusts_1_2_labels
+cormat = cor(filtered)
+corrplot(cormat,order="hclust",tl.cex=0.5,tl.col = "purple")
+```
+
+Our strategy is to combine features significantly correlated to labels.
+```{r}
+engineered <- sampled+1
+engineered$a1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$ground_floor_type)
+engineered$a2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_cement_mortar_stone)
+engineered$a3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_secondary_use_hotel)
+engineered$a4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$roof_type)
+engineered$a5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_non_engineered)
+engineered$a6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$geo_level_1_id)
+engineered$a7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$area_percentage)
+engineered$a8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_engineered)
+
+
+engineered$b1 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$ground_floor_type)
+engineered$b2 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_cement_mortar_stone)
+engineered$b3 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_secondary_use_hotel)
+engineered$b4 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$roof_type)
+engineered$b5 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_non_engineered)
+engineered$b6 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$geo_level_1_id)
+engineered$b7 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$area_percentage)
+engineered$b8 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_engineered)
+
+engineered$c1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$ground_floor_type)
+engineered$c2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_cement_mortar_stone)
+engineered$c3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_secondary_use_hotel)
+engineered$c4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$roof_type)
+engineered$c5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_non_engineered)
+engineered$c6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$geo_level_1_id)
+engineered$c7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$area_percentage)
+engineered$c8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_engineered)
+
+
+engineered$d1 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$ground_floor_type)
+engineered$d2 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_cement_mortar_stone)
+engineered$d3 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_secondary_use_hotel)
+engineered$d4 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$roof_type)
+engineered$d5 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_non_engineered)
+engineered$d6 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$geo_level_1_id)
+engineered$d7 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$area_percentage)
+engineered$d8 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_engineered)
+
+engineered$e1 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$ground_floor_type)
+engineered$e2 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_cement_mortar_stone)
+engineered$e3 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_secondary_use_hotel)
+engineered$e4 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$roof_type)
+engineered$e5 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_non_engineered)
+engineered$e6 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$geo_level_1_id)
+engineered$e7 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$area_percentage)
+engineered$e8 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_engineered)
+
+engineered
+```
+
+```{r}
+res.pca = PCA(engineered,ncp = 5) 
+comps = data.frame(res.pca$ind$coord)
+#ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=sampled_labels))+geom_point()
+
+```
+
+```{r}
+res.pca$var$contrib
+```
+
+```{r}
+getSilhouette(comps,sampled_labels,sampling_rate = 0.1)
+```
+
+```{r}
+to_correlate = engineered
+to_correlate$LABEL = sampled_labels
+cormat = cor(to_correlate)
+corrplot(cormat,order="hclust",tl.cex=0.5,tl.col = "purple")
+curr = data.frame(cormat)
+filtered = to_correlate[,which(colnames(to_correlate) %in% rownames(curr)[which(abs(curr$LABEL)>0.1)])]
+filtered$LABEL = sampled_labels
+cormat = cor(filtered)
+corrplot(cormat,order="hclust",tl.cex=0.5,tl.col = "purple")
+```
+
+```{r}
+engineered_2 <- filtered
+engineered_2$LABEL = NULL
+
+engineered_2$f1 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$e7)
+engineered_2$f2 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$d7)
+engineered_2$f3 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$c7)
+engineered_2$f4 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b7)
+engineered_2$f5 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b8)
+engineered_2$f6 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b2)
+engineered_2$f7 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b3)
+engineered_2$f8 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b4)
+engineered_2$f9 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b5)
+engineered_2$f10 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$a1)
+engineered_2$f11 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$b1)
+engineered_2$f12 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$c1)
+engineered_2$f13 = mapply(function(x,y){x*y},engineered_2$a7,engineered_2$e1)
+
+engineered_2$f14 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$d7)
+engineered_2$f15 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$c7)
+engineered_2$f16 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b7)
+engineered_2$f17 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b8)
+engineered_2$f18 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b2)
+engineered_2$f19 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b3)
+engineered_2$f20 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b4)
+engineered_2$f21 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b5)
+engineered_2$f22 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$a1)
+engineered_2$f23 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$b1)
+engineered_2$f24 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$c1)
+engineered_2$f25 = mapply(function(x,y){x*y},engineered_2$e7,engineered_2$e1)
+
+engineered_2$f26 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$c7)
+engineered_2$f27 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b7)
+engineered_2$f28 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b8)
+engineered_2$f29 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b2)
+engineered_2$f30 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b3)
+engineered_2$f31 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b4)
+engineered_2$f32 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b5)
+engineered_2$f33 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$a1)
+engineered_2$f34 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$b1)
+engineered_2$f35 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$c1)
+engineered_2$f36 = mapply(function(x,y){x*y},engineered_2$d7,engineered_2$e1)
+
+engineered_2$f37 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b7)
+engineered_2$f38 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b8)
+engineered_2$f39 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b2)
+engineered_2$f40 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b3)
+engineered_2$f41 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b4)
+engineered_2$f42 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b5)
+engineered_2$f43 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$a1)
+engineered_2$f44 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b1)
+engineered_2$f45 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$c1)
+engineered_2$f46 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$e1)
+
+engineered_2$f47 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b8)
+engineered_2$f48 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b2)
+engineered_2$f49 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b3)
+engineered_2$f50 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b4)
+engineered_2$f51 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b5)
+engineered_2$f52 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$a1)
+engineered_2$f53 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$b1)
+engineered_2$f54 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$c1)
+engineered_2$f55 = mapply(function(x,y){x*y},engineered_2$b7,engineered_2$e1)
+
+engineered_2$f56 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b8)
+engineered_2$f57 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b2)
+engineered_2$f58 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b3)
+engineered_2$f59 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b4)
+engineered_2$f60 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b5)
+engineered_2$f61 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$a1)
+engineered_2$f62 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$b1)
+engineered_2$f63 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$c1)
+engineered_2$f64 = mapply(function(x,y){x*y},engineered_2$c7,engineered_2$e1)
+
+engineered_2$f65 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$b2)
+engineered_2$f66 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$b3)
+engineered_2$f67 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$b4)
+engineered_2$f68 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$b5)
+engineered_2$f69 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$a1)
+engineered_2$f70 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$b1)
+engineered_2$f71 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$c1)
+engineered_2$f72 = mapply(function(x,y){x*y},engineered_2$b8,engineered_2$e1)
+
+engineered_2$f73 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$b3)
+engineered_2$f74 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$b4)
+engineered_2$f75 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$b5)
+engineered_2$f76 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$a1)
+engineered_2$f77 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$b1)
+engineered_2$f78 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$c1)
+engineered_2$f79 = mapply(function(x,y){x*y},engineered_2$b2,engineered_2$e1)
+
+engineered_2$f80 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$b4)
+engineered_2$f81 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$b5)
+engineered_2$f82 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$a1)
+engineered_2$f83 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$b1)
+engineered_2$f84 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$c1)
+engineered_2$f85 = mapply(function(x,y){x*y},engineered_2$b3,engineered_2$e1)
+
+engineered_2$f86 = mapply(function(x,y){x*y},engineered_2$b4,engineered_2$b5)
+engineered_2$f87 = mapply(function(x,y){x*y},engineered_2$b4,engineered_2$a1)
+engineered_2$f88 = mapply(function(x,y){x*y},engineered_2$b4,engineered_2$b1)
+engineered_2$f89 = mapply(function(x,y){x*y},engineered_2$b4,engineered_2$c1)
+engineered_2$f90 = mapply(function(x,y){x*y},engineered_2$b4,engineered_2$e1)
+
+engineered_2$f91 = mapply(function(x,y){x*y},engineered_2$b5,engineered_2$a1)
+engineered_2$f92 = mapply(function(x,y){x*y},engineered_2$b5,engineered_2$b1)
+engineered_2$f93 = mapply(function(x,y){x*y},engineered_2$b5,engineered_2$c1)
+engineered_2$f94 = mapply(function(x,y){x*y},engineered_2$b5,engineered_2$e1)
+
+engineered_2$f95 = mapply(function(x,y){x*y},engineered_2$a1,engineered_2$b1)
+engineered_2$f96 = mapply(function(x,y){x*y},engineered_2$a1,engineered_2$c1)
+engineered_2$f97 = mapply(function(x,y){x*y},engineered_2$a1,engineered_2$e1)
+
+engineered_2$f98 = mapply(function(x,y){x*y},engineered_2$b1,engineered_2$c1)
+engineered_2$f99 = mapply(function(x,y){x*y},engineered_2$b1,engineered_2$e1)
+
+engineered_2$f100 = mapply(function(x,y){x*y},engineered_2$c1,engineered_2$e1)
+```
+
+
+```{r}
+res.pca = PCA(engineered_2,ncp = 5) 
+comps = data.frame(res.pca$ind$coord)
+#ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=sampled_labels))+geom_point()
+```
+
+```{r}
+getSilhouette(comps,sampled_labels,sampling_rate = 0.1)
+```
+
+```{r}
+to_correlate = engineered_2
+to_correlate$LABEL = sampled_labels
+cormat = cor(to_correlate)
+corrplot(cormat,order="hclust",tl.cex=0.5,tl.col = "purple")
+curr = data.frame(cormat)
+filtered = to_correlate[,which(colnames(to_correlate) %in% rownames(curr)[which(abs(curr$LABEL)>0.4)])]
+filtered$LABEL = sampled_labels
+cormat = cor(filtered)
+corrplot(cormat,order="hclust",tl.cex=0.5,tl.col = "purple")
+```
+
+
+```{r}
+engineered_3 <- filtered
+engineered_3$LABEL = NULL
+res.pca = PCA(engineered,ncp = 5) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=sampled_labels))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=sampled_labels))+geom_point()
+
+```
+
+```{r}
+getSilhouette(comps,sampled_labels,sampling_rate = 0.1)
+```
+
+
+# Finally, perform feature engineering on the train and test dataset 
+# Train 
+```{r}
+engineered = train+1
+
+engineered$a1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$ground_floor_type)
+engineered$a2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_cement_mortar_stone)
+engineered$a3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_secondary_use_hotel)
+engineered$a4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$roof_type)
+engineered$a5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_non_engineered)
+engineered$a6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$geo_level_1_id)
+engineered$a7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$area_percentage)
+engineered$a8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_engineered)
+
+
+engineered$b1 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$ground_floor_type)
+engineered$b2 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_cement_mortar_stone)
+engineered$b3 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_secondary_use_hotel)
+engineered$b4 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$roof_type)
+engineered$b5 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_non_engineered)
+engineered$b6 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$geo_level_1_id)
+engineered$b7 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$area_percentage)
+engineered$b8 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_engineered)
+
+engineered$c1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$ground_floor_type)
+engineered$c2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_cement_mortar_stone)
+engineered$c3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_secondary_use_hotel)
+engineered$c4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$roof_type)
+engineered$c5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_non_engineered)
+engineered$c6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$geo_level_1_id)
+engineered$c7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$area_percentage)
+engineered$c8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_engineered)
+
+
+engineered$d1 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$ground_floor_type)
+engineered$d2 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_cement_mortar_stone)
+engineered$d3 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_secondary_use_hotel)
+engineered$d4 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$roof_type)
+engineered$d5 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_non_engineered)
+engineered$d6 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$geo_level_1_id)
+engineered$d7 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$area_percentage)
+engineered$d8 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_engineered)
+
+engineered$e1 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$ground_floor_type)
+engineered$e2 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_cement_mortar_stone)
+engineered$e3 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_secondary_use_hotel)
+engineered$e4 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$roof_type)
+engineered$e5 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_non_engineered)
+engineered$e6 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$geo_level_1_id)
+engineered$e7 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$area_percentage)
+engineered$e8 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_engineered)
+
+engineered$f1 = mapply(function(x,y){x*y},engineered$a7,engineered$e7)
+engineered$f2 = mapply(function(x,y){x*y},engineered$a7,engineered$d7)
+engineered$f3 = mapply(function(x,y){x*y},engineered$a7,engineered$c7)
+engineered$f4 = mapply(function(x,y){x*y},engineered$a7,engineered$b7)
+engineered$f5 = mapply(function(x,y){x*y},engineered$a7,engineered$b8)
+engineered$f6 = mapply(function(x,y){x*y},engineered$a7,engineered$b2)
+engineered$f7 = mapply(function(x,y){x*y},engineered$a7,engineered$b3)
+engineered$f8 = mapply(function(x,y){x*y},engineered$a7,engineered$b4)
+engineered$f9 = mapply(function(x,y){x*y},engineered$a7,engineered$b5)
+engineered$f10 = mapply(function(x,y){x*y},engineered$a7,engineered$a1)
+engineered$f11 = mapply(function(x,y){x*y},engineered$a7,engineered$b1)
+engineered$f12 = mapply(function(x,y){x*y},engineered$a7,engineered$c1)
+engineered$f13 = mapply(function(x,y){x*y},engineered$a7,engineered$e1)
+
+engineered$f14 = mapply(function(x,y){x*y},engineered$e7,engineered$d7)
+engineered$f15 = mapply(function(x,y){x*y},engineered$e7,engineered$c7)
+engineered$f16 = mapply(function(x,y){x*y},engineered$e7,engineered$b7)
+engineered$f17 = mapply(function(x,y){x*y},engineered$e7,engineered$b8)
+engineered$f18 = mapply(function(x,y){x*y},engineered$e7,engineered$b2)
+engineered$f19 = mapply(function(x,y){x*y},engineered$e7,engineered$b3)
+engineered$f20 = mapply(function(x,y){x*y},engineered$e7,engineered$b4)
+engineered$f21 = mapply(function(x,y){x*y},engineered$e7,engineered$b5)
+engineered$f22 = mapply(function(x,y){x*y},engineered$e7,engineered$a1)
+engineered$f23 = mapply(function(x,y){x*y},engineered$e7,engineered$b1)
+engineered$f24 = mapply(function(x,y){x*y},engineered$e7,engineered$c1)
+engineered$f25 = mapply(function(x,y){x*y},engineered$e7,engineered$e1)
+
+engineered$f26 = mapply(function(x,y){x*y},engineered$d7,engineered$c7)
+engineered$f27 = mapply(function(x,y){x*y},engineered$d7,engineered$b7)
+engineered$f28 = mapply(function(x,y){x*y},engineered$d7,engineered$b8)
+engineered$f29 = mapply(function(x,y){x*y},engineered$d7,engineered$b2)
+engineered$f30 = mapply(function(x,y){x*y},engineered$d7,engineered$b3)
+engineered$f31 = mapply(function(x,y){x*y},engineered$d7,engineered$b4)
+engineered$f32 = mapply(function(x,y){x*y},engineered$d7,engineered$b5)
+engineered$f33 = mapply(function(x,y){x*y},engineered$d7,engineered$a1)
+engineered$f34 = mapply(function(x,y){x*y},engineered$d7,engineered$b1)
+engineered$f35 = mapply(function(x,y){x*y},engineered$d7,engineered$c1)
+engineered$f36 = mapply(function(x,y){x*y},engineered$d7,engineered$e1)
+
+engineered$f37 = mapply(function(x,y){x*y},engineered$c7,engineered$b7)
+engineered$f38 = mapply(function(x,y){x*y},engineered$c7,engineered$b8)
+engineered$f39 = mapply(function(x,y){x*y},engineered$c7,engineered$b2)
+engineered$f40 = mapply(function(x,y){x*y},engineered$c7,engineered$b3)
+engineered$f41 = mapply(function(x,y){x*y},engineered$c7,engineered$b4)
+engineered$f42 = mapply(function(x,y){x*y},engineered$c7,engineered$b5)
+engineered$f43 = mapply(function(x,y){x*y},engineered$c7,engineered$a1)
+engineered$f44 = mapply(function(x,y){x*y},engineered$c7,engineered$b1)
+engineered$f45 = mapply(function(x,y){x*y},engineered$c7,engineered$c1)
+engineered$f46 = mapply(function(x,y){x*y},engineered$c7,engineered$e1)
+
+engineered$f47 = mapply(function(x,y){x*y},engineered$b7,engineered$b8)
+engineered$f48 = mapply(function(x,y){x*y},engineered$b7,engineered$b2)
+engineered$f49 = mapply(function(x,y){x*y},engineered$b7,engineered$b3)
+engineered$f50 = mapply(function(x,y){x*y},engineered$b7,engineered$b4)
+engineered$f51 = mapply(function(x,y){x*y},engineered$b7,engineered$b5)
+engineered$f52 = mapply(function(x,y){x*y},engineered$b7,engineered$a1)
+engineered$f53 = mapply(function(x,y){x*y},engineered$b7,engineered$b1)
+engineered$f54 = mapply(function(x,y){x*y},engineered$b7,engineered$c1)
+engineered$f55 = mapply(function(x,y){x*y},engineered$b7,engineered$e1)
+
+engineered$f56 = mapply(function(x,y){x*y},engineered$c7,engineered$b8)
+engineered$f57 = mapply(function(x,y){x*y},engineered$c7,engineered$b2)
+engineered$f58 = mapply(function(x,y){x*y},engineered$c7,engineered$b3)
+engineered$f59 = mapply(function(x,y){x*y},engineered$c7,engineered$b4)
+engineered$f60 = mapply(function(x,y){x*y},engineered$c7,engineered$b5)
+engineered$f61 = mapply(function(x,y){x*y},engineered$c7,engineered$a1)
+engineered$f62 = mapply(function(x,y){x*y},engineered$c7,engineered$b1)
+engineered$f63 = mapply(function(x,y){x*y},engineered$c7,engineered$c1)
+engineered$f64 = mapply(function(x,y){x*y},engineered$c7,engineered$e1)
+
+engineered$f65 = mapply(function(x,y){x*y},engineered$b8,engineered$b2)
+engineered$f66 = mapply(function(x,y){x*y},engineered$b8,engineered$b3)
+engineered$f67 = mapply(function(x,y){x*y},engineered$b8,engineered$b4)
+engineered$f68 = mapply(function(x,y){x*y},engineered$b8,engineered$b5)
+engineered$f69 = mapply(function(x,y){x*y},engineered$b8,engineered$a1)
+engineered$f70 = mapply(function(x,y){x*y},engineered$b8,engineered$b1)
+engineered$f71 = mapply(function(x,y){x*y},engineered$b8,engineered$c1)
+engineered$f72 = mapply(function(x,y){x*y},engineered$b8,engineered$e1)
+
+engineered$f73 = mapply(function(x,y){x*y},engineered$b2,engineered$b3)
+engineered$f74 = mapply(function(x,y){x*y},engineered$b2,engineered$b4)
+engineered$f75 = mapply(function(x,y){x*y},engineered$b2,engineered$b5)
+engineered$f76 = mapply(function(x,y){x*y},engineered$b2,engineered$a1)
+engineered$f77 = mapply(function(x,y){x*y},engineered$b2,engineered$b1)
+engineered$f78 = mapply(function(x,y){x*y},engineered$b2,engineered$c1)
+engineered$f79 = mapply(function(x,y){x*y},engineered$b2,engineered$e1)
+
+engineered$f80 = mapply(function(x,y){x*y},engineered$b3,engineered$b4)
+engineered$f81 = mapply(function(x,y){x*y},engineered$b3,engineered$b5)
+engineered$f82 = mapply(function(x,y){x*y},engineered$b3,engineered$a1)
+engineered$f83 = mapply(function(x,y){x*y},engineered$b3,engineered$b1)
+engineered$f84 = mapply(function(x,y){x*y},engineered$b3,engineered$c1)
+engineered$f85 = mapply(function(x,y){x*y},engineered$b3,engineered$e1)
+
+engineered$f86 = mapply(function(x,y){x*y},engineered$b4,engineered$b5)
+engineered$f87 = mapply(function(x,y){x*y},engineered$b4,engineered$a1)
+engineered$f88 = mapply(function(x,y){x*y},engineered$b4,engineered$b1)
+engineered$f89 = mapply(function(x,y){x*y},engineered$b4,engineered$c1)
+engineered$f90 = mapply(function(x,y){x*y},engineered$b4,engineered$e1)
+
+engineered$f91 = mapply(function(x,y){x*y},engineered$b5,engineered$a1)
+engineered$f92 = mapply(function(x,y){x*y},engineered$b5,engineered$b1)
+engineered$f93 = mapply(function(x,y){x*y},engineered$b5,engineered$c1)
+engineered$f94 = mapply(function(x,y){x*y},engineered$b5,engineered$e1)
+
+engineered$f95 = mapply(function(x,y){x*y},engineered$a1,engineered$b1)
+engineered$f96 = mapply(function(x,y){x*y},engineered$a1,engineered$c1)
+engineered$f97 = mapply(function(x,y){x*y},engineered$a1,engineered$e1)
+
+engineered$f98 = mapply(function(x,y){x*y},engineered$b1,engineered$c1)
+engineered$f99 = mapply(function(x,y){x*y},engineered$b1,engineered$e1)
+
+engineered$f100 = mapply(function(x,y){x*y},engineered$c1,engineered$e1)
+
+
+train_final = engineered
+train_final = sampleData(train_final,labels$damage_grade,n_inds=25000)
+label_final = train_final$label
+train_final$label = NULL
+
+train_final$label = label_final
+write.csv(train_final,"train_vals.csv")
+```
+
+```{r}
+cols = names(test)
+for(i in 1:length(cols))
+{
+  test[,i]=as.integer(test[,i])
+}
+engineered = test+1
+
+engineered$a1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$ground_floor_type)
+engineered$a2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_cement_mortar_stone)
+engineered$a3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_secondary_use_hotel)
+engineered$a4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$roof_type)
+engineered$a5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_non_engineered)
+engineered$a6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$geo_level_1_id)
+engineered$a7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$area_percentage)
+engineered$a8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_stone,engineered$has_superstructure_rc_engineered)
+
+
+engineered$b1 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$ground_floor_type)
+engineered$b2 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_cement_mortar_stone)
+engineered$b3 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_secondary_use_hotel)
+engineered$b4 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$roof_type)
+engineered$b5 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_non_engineered)
+engineered$b6 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$geo_level_1_id)
+engineered$b7 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$area_percentage)
+engineered$b8 = mapply(function(x,y){x/y},engineered$legal_ownership_status,engineered$has_superstructure_rc_engineered)
+
+engineered$c1 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$ground_floor_type)
+engineered$c2 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_cement_mortar_stone)
+engineered$c3 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_secondary_use_hotel)
+engineered$c4 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$roof_type)
+engineered$c5 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_non_engineered)
+engineered$c6 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$geo_level_1_id)
+engineered$c7 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$area_percentage)
+engineered$c8 = mapply(function(x,y){x/y},engineered$has_superstructure_mud_mortar_brick,engineered$has_superstructure_rc_engineered)
+
+
+engineered$d1 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$ground_floor_type)
+engineered$d2 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_cement_mortar_stone)
+engineered$d3 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_secondary_use_hotel)
+engineered$d4 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$roof_type)
+engineered$d5 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_non_engineered)
+engineered$d6 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$geo_level_1_id)
+engineered$d7 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$area_percentage)
+engineered$d8 = mapply(function(x,y){x/y},engineered$has_superstructure_adobe_mud,engineered$has_superstructure_rc_engineered)
+
+engineered$e1 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$ground_floor_type)
+engineered$e2 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_cement_mortar_stone)
+engineered$e3 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_secondary_use_hotel)
+engineered$e4 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$roof_type)
+engineered$e5 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_non_engineered)
+engineered$e6 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$geo_level_1_id)
+engineered$e7 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$area_percentage)
+engineered$e8 = mapply(function(x,y){x/y},engineered$count_floors_pre_eq,engineered$has_superstructure_rc_engineered)
+
+engineered$f1 = mapply(function(x,y){x*y},engineered$a7,engineered$e7)
+engineered$f2 = mapply(function(x,y){x*y},engineered$a7,engineered$d7)
+engineered$f3 = mapply(function(x,y){x*y},engineered$a7,engineered$c7)
+engineered$f4 = mapply(function(x,y){x*y},engineered$a7,engineered$b7)
+engineered$f5 = mapply(function(x,y){x*y},engineered$a7,engineered$b8)
+engineered$f6 = mapply(function(x,y){x*y},engineered$a7,engineered$b2)
+engineered$f7 = mapply(function(x,y){x*y},engineered$a7,engineered$b3)
+engineered$f8 = mapply(function(x,y){x*y},engineered$a7,engineered$b4)
+engineered$f9 = mapply(function(x,y){x*y},engineered$a7,engineered$b5)
+engineered$f10 = mapply(function(x,y){x*y},engineered$a7,engineered$a1)
+engineered$f11 = mapply(function(x,y){x*y},engineered$a7,engineered$b1)
+engineered$f12 = mapply(function(x,y){x*y},engineered$a7,engineered$c1)
+engineered$f13 = mapply(function(x,y){x*y},engineered$a7,engineered$e1)
+
+engineered$f14 = mapply(function(x,y){x*y},engineered$e7,engineered$d7)
+engineered$f15 = mapply(function(x,y){x*y},engineered$e7,engineered$c7)
+engineered$f16 = mapply(function(x,y){x*y},engineered$e7,engineered$b7)
+engineered$f17 = mapply(function(x,y){x*y},engineered$e7,engineered$b8)
+engineered$f18 = mapply(function(x,y){x*y},engineered$e7,engineered$b2)
+engineered$f19 = mapply(function(x,y){x*y},engineered$e7,engineered$b3)
+engineered$f20 = mapply(function(x,y){x*y},engineered$e7,engineered$b4)
+engineered$f21 = mapply(function(x,y){x*y},engineered$e7,engineered$b5)
+engineered$f22 = mapply(function(x,y){x*y},engineered$e7,engineered$a1)
+engineered$f23 = mapply(function(x,y){x*y},engineered$e7,engineered$b1)
+engineered$f24 = mapply(function(x,y){x*y},engineered$e7,engineered$c1)
+engineered$f25 = mapply(function(x,y){x*y},engineered$e7,engineered$e1)
+
+engineered$f26 = mapply(function(x,y){x*y},engineered$d7,engineered$c7)
+engineered$f27 = mapply(function(x,y){x*y},engineered$d7,engineered$b7)
+engineered$f28 = mapply(function(x,y){x*y},engineered$d7,engineered$b8)
+engineered$f29 = mapply(function(x,y){x*y},engineered$d7,engineered$b2)
+engineered$f30 = mapply(function(x,y){x*y},engineered$d7,engineered$b3)
+engineered$f31 = mapply(function(x,y){x*y},engineered$d7,engineered$b4)
+engineered$f32 = mapply(function(x,y){x*y},engineered$d7,engineered$b5)
+engineered$f33 = mapply(function(x,y){x*y},engineered$d7,engineered$a1)
+engineered$f34 = mapply(function(x,y){x*y},engineered$d7,engineered$b1)
+engineered$f35 = mapply(function(x,y){x*y},engineered$d7,engineered$c1)
+engineered$f36 = mapply(function(x,y){x*y},engineered$d7,engineered$e1)
+
+engineered$f37 = mapply(function(x,y){x*y},engineered$c7,engineered$b7)
+engineered$f38 = mapply(function(x,y){x*y},engineered$c7,engineered$b8)
+engineered$f39 = mapply(function(x,y){x*y},engineered$c7,engineered$b2)
+engineered$f40 = mapply(function(x,y){x*y},engineered$c7,engineered$b3)
+engineered$f41 = mapply(function(x,y){x*y},engineered$c7,engineered$b4)
+engineered$f42 = mapply(function(x,y){x*y},engineered$c7,engineered$b5)
+engineered$f43 = mapply(function(x,y){x*y},engineered$c7,engineered$a1)
+engineered$f44 = mapply(function(x,y){x*y},engineered$c7,engineered$b1)
+engineered$f45 = mapply(function(x,y){x*y},engineered$c7,engineered$c1)
+engineered$f46 = mapply(function(x,y){x*y},engineered$c7,engineered$e1)
+
+engineered$f47 = mapply(function(x,y){x*y},engineered$b7,engineered$b8)
+engineered$f48 = mapply(function(x,y){x*y},engineered$b7,engineered$b2)
+engineered$f49 = mapply(function(x,y){x*y},engineered$b7,engineered$b3)
+engineered$f50 = mapply(function(x,y){x*y},engineered$b7,engineered$b4)
+engineered$f51 = mapply(function(x,y){x*y},engineered$b7,engineered$b5)
+engineered$f52 = mapply(function(x,y){x*y},engineered$b7,engineered$a1)
+engineered$f53 = mapply(function(x,y){x*y},engineered$b7,engineered$b1)
+engineered$f54 = mapply(function(x,y){x*y},engineered$b7,engineered$c1)
+engineered$f55 = mapply(function(x,y){x*y},engineered$b7,engineered$e1)
+
+engineered$f56 = mapply(function(x,y){x*y},engineered$c7,engineered$b8)
+engineered$f57 = mapply(function(x,y){x*y},engineered$c7,engineered$b2)
+engineered$f58 = mapply(function(x,y){x*y},engineered$c7,engineered$b3)
+engineered$f59 = mapply(function(x,y){x*y},engineered$c7,engineered$b4)
+engineered$f60 = mapply(function(x,y){x*y},engineered$c7,engineered$b5)
+engineered$f61 = mapply(function(x,y){x*y},engineered$c7,engineered$a1)
+engineered$f62 = mapply(function(x,y){x*y},engineered$c7,engineered$b1)
+engineered$f63 = mapply(function(x,y){x*y},engineered$c7,engineered$c1)
+engineered$f64 = mapply(function(x,y){x*y},engineered$c7,engineered$e1)
+
+engineered$f65 = mapply(function(x,y){x*y},engineered$b8,engineered$b2)
+engineered$f66 = mapply(function(x,y){x*y},engineered$b8,engineered$b3)
+engineered$f67 = mapply(function(x,y){x*y},engineered$b8,engineered$b4)
+engineered$f68 = mapply(function(x,y){x*y},engineered$b8,engineered$b5)
+engineered$f69 = mapply(function(x,y){x*y},engineered$b8,engineered$a1)
+engineered$f70 = mapply(function(x,y){x*y},engineered$b8,engineered$b1)
+engineered$f71 = mapply(function(x,y){x*y},engineered$b8,engineered$c1)
+engineered$f72 = mapply(function(x,y){x*y},engineered$b8,engineered$e1)
+
+engineered$f73 = mapply(function(x,y){x*y},engineered$b2,engineered$b3)
+engineered$f74 = mapply(function(x,y){x*y},engineered$b2,engineered$b4)
+engineered$f75 = mapply(function(x,y){x*y},engineered$b2,engineered$b5)
+engineered$f76 = mapply(function(x,y){x*y},engineered$b2,engineered$a1)
+engineered$f77 = mapply(function(x,y){x*y},engineered$b2,engineered$b1)
+engineered$f78 = mapply(function(x,y){x*y},engineered$b2,engineered$c1)
+engineered$f79 = mapply(function(x,y){x*y},engineered$b2,engineered$e1)
+
+engineered$f80 = mapply(function(x,y){x*y},engineered$b3,engineered$b4)
+engineered$f81 = mapply(function(x,y){x*y},engineered$b3,engineered$b5)
+engineered$f82 = mapply(function(x,y){x*y},engineered$b3,engineered$a1)
+engineered$f83 = mapply(function(x,y){x*y},engineered$b3,engineered$b1)
+engineered$f84 = mapply(function(x,y){x*y},engineered$b3,engineered$c1)
+engineered$f85 = mapply(function(x,y){x*y},engineered$b3,engineered$e1)
+
+engineered$f86 = mapply(function(x,y){x*y},engineered$b4,engineered$b5)
+engineered$f87 = mapply(function(x,y){x*y},engineered$b4,engineered$a1)
+engineered$f88 = mapply(function(x,y){x*y},engineered$b4,engineered$b1)
+engineered$f89 = mapply(function(x,y){x*y},engineered$b4,engineered$c1)
+engineered$f90 = mapply(function(x,y){x*y},engineered$b4,engineered$e1)
+
+engineered$f91 = mapply(function(x,y){x*y},engineered$b5,engineered$a1)
+engineered$f92 = mapply(function(x,y){x*y},engineered$b5,engineered$b1)
+engineered$f93 = mapply(function(x,y){x*y},engineered$b5,engineered$c1)
+engineered$f94 = mapply(function(x,y){x*y},engineered$b5,engineered$e1)
+
+engineered$f95 = mapply(function(x,y){x*y},engineered$a1,engineered$b1)
+engineered$f96 = mapply(function(x,y){x*y},engineered$a1,engineered$c1)
+engineered$f97 = mapply(function(x,y){x*y},engineered$a1,engineered$e1)
+
+engineered$f98 = mapply(function(x,y){x*y},engineered$b1,engineered$c1)
+engineered$f99 = mapply(function(x,y){x*y},engineered$b1,engineered$e1)
+
+engineered$f100 = mapply(function(x,y){x*y},engineered$c1,engineered$e1)
+
+test_final = engineered
+head(test_final)
+
+write.csv(test_final,"test_vals.csv")
+
+```
+
+
+```{r}
+data <- train
+data$building_id = NULL
+data <- data+2
+data$f1 = mapply(function(x,y){x*y},data$has_superstructure_mud_mortar_stone,data$has_superstructure_rc_engineered)
+res.pca = PCA(data) 
+comps = data.frame(res.pca$ind$coord)
+ggplot(comps,aes(Dim.1,Dim.2,color=labels$damage_grade))+geom_point()
+ggplot(comps,aes(Dim.1,Dim.3,color=labels$damage_grade))+geom_point()
+ggplot(comps,aes(Dim.2,Dim.3,color=labels$damage_grade))+geom_point()
+```
+
